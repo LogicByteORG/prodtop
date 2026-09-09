@@ -1,0 +1,10 @@
+refresh_seconds: 2
+query_timeout_seconds: 5
+postgres:
+  - name: demo
+    dsn: postgres://prodtop:prodtop@localhost:5432/prodtop?sslmode=disable
+redis:
+  - name: demo
+    addr: localhost:6379
+    password: ""
+    db: 0

@@ -1,0 +1,10 @@
+refresh_seconds: 2
+query_timeout_seconds: 5
+postgres:
+  - name: prod
+    dsn: postgres://app:changeme@db.internal:5432/appdb?sslmode=require
+redis:
+  - name: cache
+    addr: cache.internal:6379
+    password: ""
+    db: 0

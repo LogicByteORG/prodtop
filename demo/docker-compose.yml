@@ -1,0 +1,27 @@
+name: prodtop-demo
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: prodtop
+      POSTGRES_PASSWORD: prodtop
+      POSTGRES_DB: prodtop
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U prodtop"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    volumes:
+      - redisdata:/data
+volumes:
+  pgdata:
+  redisdata:
