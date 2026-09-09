@@ -38,9 +38,11 @@ jobs:
       - run: curl -sSL -o ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 && chmod +x ttyd && sudo mv ttyd /usr/local/bin/ttyd
       - run: go install github.com/charmbracelet/vhs@latest
       - run: go build -o bin/prodtop ./cmd/prodtop
+      - run: PGCID=$(docker ps -q --filter "ancestor=postgres:16" | head -n1) && docker exec $PGCID psql -U prodtop -d prodtop -c "ALTER SYSTEM SET shared_preload_libraries = 'pg_stat_statements';" && docker restart $PGCID && sleep 15
       - run: docker run --rm --network host -v ${{ github.workspace }}/demo/seed.sql:/seed.sql:ro -e PGPASSWORD=prodtop postgres:16 psql -h 127.0.0.1 -U prodtop -d prodtop -f /seed.sql
       - run: CID=$(docker ps -q --filter "ancestor=redis:7" | head -n1) && docker exec $CID redis-cli MSET session:1000 abc123 cart:42 active queue:jobs 3 && docker exec $CID redis-cli DEBUG SLEEP 0.4 && docker exec $CID redis-cli DEBUG SLEEP 0.2
       - run: $(go env GOPATH)/bin/vhs demo/demo.tape
+      - run: ls -la demo/ && find ${{ github.workspace }} -maxdepth 3 -name "*.gif" -exec ls -la {} \;
       - run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"

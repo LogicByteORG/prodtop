@@ -122,7 +122,7 @@ func (c *Client) Blocking(ctx context.Context) ([]Block, error) {
 	ctx, cancel := c.withTimeout(ctx)
 	defer cancel()
 	rows, err := c.pool.Query(ctx, `
-SELECT blocked.pid, blocking.pid,
+SELECT blocked_act.pid, blocking_act.pid,
   blocked_act.query, blocking_act.query,
   blocked_locks.locktype, blocked_locks.mode
 FROM pg_locks blocked_locks
