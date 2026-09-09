@@ -1,0 +1,50 @@
+name: demo
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: prodtop
+          POSTGRES_PASSWORD: prodtop
+          POSTGRES_DB: prodtop
+        ports:
+          - 5432:5432
+        volumes:
+          - ${{ github.workspace }}/demo/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg fonts-dejavu-core
+      - run: curl -sSL -o ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 && chmod +x ttyd && sudo mv ttyd /usr/local/bin/ttyd
+      - run: go install github.com/charmbracelet/vhs@latest
+      - run: go build -o bin/prodtop ./cmd/prodtop
+      - run: CID=$(docker ps -q --filter "ancestor=redis:7" | head -n1) && docker exec $CID redis-cli MSET session:1000 abc123 cart:42 active queue:jobs 3 && docker exec $CID redis-cli DEBUG SLEEP 0.4 && docker exec $CID redis-cli DEBUG SLEEP 0.2
+      - run: $(go env GOPATH)/bin/vhs demo/demo.tape
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add demo/demo.gif
+          git diff --cached --quiet || git commit -m "demo: regenerate gif"
+          git push

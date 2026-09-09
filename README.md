@@ -8,6 +8,8 @@ way unless you ask otherwise.
 Built with Go and Bubble Tea. Single binary, no server, your queries never
 leave your machine.
 
+![prodtop demo](demo/demo.gif)
+
 ## Install
 
 Requires Go 1.24 or newer.
