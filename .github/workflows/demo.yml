@@ -42,7 +42,8 @@ jobs:
       - run: docker run --rm --network host -v ${{ github.workspace }}/demo/seed.sql:/seed.sql:ro -e PGPASSWORD=prodtop postgres:16 psql -h 127.0.0.1 -U prodtop -d prodtop -f /seed.sql
       - run: CID=$(docker ps -q --filter "ancestor=redis:7" | head -n1) && docker exec $CID redis-cli MSET session:1000 abc123 cart:42 active queue:jobs 3 && docker exec $CID redis-cli DEBUG SLEEP 0.4 && docker exec $CID redis-cli DEBUG SLEEP 0.2
       - run: $(go env GOPATH)/bin/vhs demo/demo.tape
-      - run: pwd && ls -la && ls -la demo/ && echo HOME_CONTENT && ls ~/demo.gif 2>/dev/null; find ${{ github.workspace }} -maxdepth 3 -name "*.gif" -exec ls -la {} \; ; find /tmp -maxdepth 3 -name "*.gif" -exec ls -la {} \;
+      - run: which ffmpeg && ffmpeg -version 2>&1 | head -2 && ffmpeg -f lavfi -i testsrc=duration=1:size=320x200:rate=5 -y /tmp/probe.gif && ls -la /tmp/probe.gif
+      - run: pwd && ls -la demo/ && find /home/runner -maxdepth 5 -name "demo.gif" 2>/dev/null; find /tmp -name "*.gif" 2>/dev/null; echo diag-exit=$?
       - run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
