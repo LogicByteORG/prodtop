@@ -56,6 +56,12 @@ type Model struct {
 	slow         []redis.SlowEntry
 	rkeys        []redis.KeyEntry
 	rclients     map[string]*redis.Client
+	palette      bool
+	palCursor    int
+	palQuery     string
+	filtering    bool
+	filterInput  textinput.Model
+	filter       string
 }
 
 type tickMsg time.Time
@@ -114,19 +120,23 @@ func New(cfg config.Config, write bool, version string) Model {
 	ti.Placeholder = "SELECT * FROM users LIMIT 20"
 	ti.Prompt = "sql> "
 	ti.CharLimit = 2000
+	fi := textinput.New()
+	fi.Prompt = "/ "
+	fi.CharLimit = 200
 	favs, _ := favorites.Load()
 	return Model{
-		cfg:      cfg,
-		write:    write,
-		version:  version,
-		services: services,
-		clients:  map[string]*postgres.Client{},
-		sqlInput: ti,
-		favs:     favs,
-		favPos:   -1,
-		rclients: map[string]*redis.Client{},
-		width:    120,
-		height:   30,
+		cfg:         cfg,
+		write:       write,
+		version:     version,
+		services:    services,
+		clients:     map[string]*postgres.Client{},
+		sqlInput:    ti,
+		filterInput: fi,
+		favs:        favs,
+		favPos:      -1,
+		rclients:    map[string]*redis.Client{},
+		width:       120,
+		height:      30,
 	}
 }
 
@@ -264,6 +274,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notice = ""
 		return m, nil
 	case tea.KeyPressMsg:
+		if m.palette {
+			return m.updatePalette(msg.String(), msg)
+		}
+		if m.filtering {
+			return m.updateFilter(msg.String(), msg)
+		}
 		if m.editing && m.active == 3 {
 			return m.updateEditor(msg.String(), msg)
 		}
@@ -468,38 +484,44 @@ func (m Model) exportCurrent() (tea.Model, tea.Cmd) {
 }
 
 func (m Model) exportData() (string, []string, [][]string) {
+	vis := m.visible()
 	switch m.active {
 	case 0:
-		rows := make([][]string, len(m.sessions))
-		for i, s := range m.sessions {
-			rows[i] = []string{fmt.Sprintf("%d", s.PID), s.User, s.Database, s.State, s.Wait, formatAgo(s.Duration), s.Query}
+		rows := make([][]string, len(vis))
+		for pos, i := range vis {
+			s := m.sessions[i]
+			rows[pos] = []string{fmt.Sprintf("%d", s.PID), s.User, s.Database, s.State, s.Wait, formatAgo(s.Duration), s.Query}
 		}
 		return "activity", []string{"pid", "user", "database", "state", "wait", "duration", "query"}, rows
 	case 1:
-		rows := make([][]string, len(m.blocks))
-		for i, b := range m.blocks {
-			rows[i] = []string{fmt.Sprintf("%d", b.BlockedPID), fmt.Sprintf("%d", b.BlockingPID), b.LockType, b.Mode, b.BlockedQuery, b.BlockingQuery}
+		rows := make([][]string, len(vis))
+		for pos, i := range vis {
+			b := m.blocks[i]
+			rows[pos] = []string{fmt.Sprintf("%d", b.BlockedPID), fmt.Sprintf("%d", b.BlockingPID), b.LockType, b.Mode, b.BlockedQuery, b.BlockingQuery}
 		}
 		return "locks", []string{"blocked_pid", "blocking_pid", "locktype", "mode", "blocked_query", "blocking_query"}, rows
 	case 2:
-		rows := make([][]string, len(m.tables))
-		for i, t := range m.tables {
-			rows[i] = []string{t.Schema, t.Name, fmt.Sprintf("%d", t.SizeBytes), fmt.Sprintf("%d", t.LiveTuples), fmt.Sprintf("%d", t.DeadTuples)}
+		rows := make([][]string, len(vis))
+		for pos, i := range vis {
+			t := m.tables[i]
+			rows[pos] = []string{t.Schema, t.Name, fmt.Sprintf("%d", t.SizeBytes), fmt.Sprintf("%d", t.LiveTuples), fmt.Sprintf("%d", t.DeadTuples)}
 		}
 		return "tables", []string{"schema", "table", "size_bytes", "live_tuples", "dead_tuples"}, rows
 	case 3:
 		if m.lastQuery != "" {
-			return "sql", m.sqlCols, m.sqlRows
+			return "sql", m.sqlCols, m.visibleRows()
 		}
-		rows := make([][]string, len(m.statements))
-		for i, s := range m.statements {
-			rows[i] = []string{fmt.Sprintf("%d", s.Calls), fmt.Sprintf("%.3f", s.MeanMs), fmt.Sprintf("%.0f", s.TotalMs), fmt.Sprintf("%d", s.Rows), s.Query}
+		rows := make([][]string, len(vis))
+		for pos, i := range vis {
+			s := m.statements[i]
+			rows[pos] = []string{fmt.Sprintf("%d", s.Calls), fmt.Sprintf("%.3f", s.MeanMs), fmt.Sprintf("%.0f", s.TotalMs), fmt.Sprintf("%d", s.Rows), s.Query}
 		}
 		return "statements", []string{"calls", "mean_ms", "total_ms", "rows", "query"}, rows
 	case 4:
-		rows := make([][]string, len(m.slow))
-		for i, s := range m.slow {
-			rows[i] = []string{fmt.Sprintf("%d", s.ID), s.At.Format(time.RFC3339), s.Duration.String(), strings.Join(s.Args, " ")}
+		rows := make([][]string, len(vis))
+		for pos, i := range vis {
+			s := m.slow[i]
+			rows[pos] = []string{fmt.Sprintf("%d", s.ID), s.At.Format(time.RFC3339), s.Duration.String(), strings.Join(s.Args, " ")}
 		}
 		return "redis-slowlog", []string{"id", "at", "duration", "command"}, rows
 	}
@@ -507,22 +529,7 @@ func (m Model) exportData() (string, []string, [][]string) {
 }
 
 func (m Model) rowCount() int {
-	switch m.active {
-	case 0:
-		return len(m.sessions)
-	case 1:
-		return len(m.blocks)
-	case 2:
-		return len(m.tables)
-	case 3:
-		if m.lastQuery != "" {
-			return len(m.sqlRows)
-		}
-		return len(m.statements)
-	case 4:
-		return len(m.slow)
-	}
-	return 0
+	return len(m.visible())
 }
 
 func (m Model) clampRow() {
@@ -563,6 +570,11 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		} else {
 			m.focus = focusServices
 		}
+		return m, nil
+	case "ctrl+k":
+		m.palette = true
+		m.palCursor = 0
+		m.palQuery = ""
 		return m, nil
 	case "1", "2", "3", "4", "5":
 		m.active = int(key[0] - '1')
@@ -646,6 +658,10 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "e":
 		return m.exportCurrent()
+	case "/":
+		m.filtering = true
+		m.filterInput.SetValue(m.filter)
+		return m, m.filterInput.Focus()
 	case "x":
 		if m.active == 3 && m.lastQuery != "" {
 			m.lastQuery = ""
@@ -668,6 +684,9 @@ func (m Model) View() tea.View {
 func (m Model) render() string {
 	if m.help {
 		return m.renderHelp()
+	}
+	if m.palette {
+		return m.renderPalette()
 	}
 	mode := "READ-ONLY"
 	if m.write {
@@ -758,18 +777,19 @@ func (m Model) activityLines(width int) []string {
 	if qw < 20 {
 		qw = 20
 	}
-	for i, s := range m.sessions {
+	for pos, i := range m.visible() {
+		s := m.sessions[i]
 		line := cell(fmt.Sprintf("%d", s.PID), 8) +
 			cell(s.User, 12) + cell(s.Database, 12) +
 			cell(s.State, 12) + cell(s.Wait, 16) +
 			cell(formatAgo(s.Duration), 7) + truncate(s.Query, qw)
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
 	}
-	if len(m.sessions) == 0 {
-		lines = append(lines, mutedStyle.Render("no sessions, press r to refresh"))
+	if len(m.visible()) == 0 {
+		lines = append(lines, mutedStyle.Render(m.emptyMessage("no sessions, press r to refresh")))
 	}
 	return lines
 }
@@ -785,17 +805,18 @@ func (m Model) blocksLines(width int) []string {
 	if qw < 20 {
 		qw = 20
 	}
-	for i, b := range m.blocks {
+	for pos, i := range m.visible() {
+		b := m.blocks[i]
 		line := cell(fmt.Sprintf("%d", b.BlockedPID), 9) +
 			cell(fmt.Sprintf("%d", b.BlockingPID), 9) +
 			cell(b.LockType+" "+b.Mode, 18) + truncate(b.BlockedQuery, qw)
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
 	}
-	if len(m.blocks) == 0 {
-		lines = append(lines, mutedStyle.Render("nothing blocked"))
+	if len(m.visible()) == 0 {
+		lines = append(lines, mutedStyle.Render(m.emptyMessage("nothing blocked")))
 	}
 	return lines
 }
@@ -809,19 +830,20 @@ func (m Model) tablesLines(width int) []string {
 		),
 	}
 	_ = width
-	for i, t := range m.tables {
+	for pos, i := range m.visible() {
+		t := m.tables[i]
 		line := cell(t.Schema, 10) + cell(t.Name, 28) +
 			cell(formatBytes(t.SizeBytes), 10) +
 			cell(fmt.Sprintf("%d", t.LiveTuples), 10) +
 			cell(fmt.Sprintf("%d", t.DeadTuples), 10) +
 			formatStamp(t.LastVacuum)
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
 	}
-	if len(m.tables) == 0 {
-		lines = append(lines, mutedStyle.Render("no tables, press r to refresh"))
+	if len(m.visible()) == 0 {
+		lines = append(lines, mutedStyle.Render(m.emptyMessage("no tables, press r to refresh")))
 	}
 	return lines
 }
@@ -854,19 +876,19 @@ func (m Model) sqlLines(width int) []string {
 		header[i] = cell(c, 18)
 	}
 	lines = append(lines, mutedStyle.Render(strings.Join(header, "")))
-	shown := m.sqlRows
+	shown := m.visibleRows()
 	extra := 0
 	if len(shown) > 30 {
 		extra = len(shown) - 30
 		shown = shown[:30]
 	}
-	for i, row := range shown {
+	for pos, row := range shown {
 		cells := make([]string, len(row))
 		for j, v := range row {
 			cells[j] = cell(v, 18)
 		}
 		line := strings.Join(cells, "")
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
@@ -874,8 +896,8 @@ func (m Model) sqlLines(width int) []string {
 	if extra > 0 {
 		lines = append(lines, mutedStyle.Render(fmt.Sprintf("+%d more rows, e to export all", extra)))
 	}
-	if len(m.sqlRows) == 0 {
-		lines = append(lines, mutedStyle.Render("query returned no rows"))
+	if len(m.visible()) == 0 {
+		lines = append(lines, mutedStyle.Render(m.emptyMessage("query returned no rows")))
 	}
 	return lines
 }
@@ -899,22 +921,23 @@ func (m Model) redisLines(width int) []string {
 		mutedStyle.Render(fmt.Sprintf("slowlog (%d)", len(m.slow))),
 		mutedStyle.Render(cell("ID", 8)+cell("AT", 10)+cell("TOOK", 10)+"COMMAND"),
 	)
-	for i, s := range m.slow {
+	for pos, i := range m.visible() {
+		s := m.slow[i]
 		line := cell(fmt.Sprintf("%d", s.ID), 8) +
 			cell(s.At.Format("15:04:05"), 10) +
 			cell(s.Duration.Round(time.Microsecond).String(), 10) +
 			truncate(strings.Join(s.Args, " "), width-36)
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
-		if i >= 19 {
-			lines = append(lines, mutedStyle.Render(fmt.Sprintf("+%d more, e to export", len(m.slow)-20)))
+		if pos >= 19 {
+			lines = append(lines, mutedStyle.Render(fmt.Sprintf("+%d more, e to export", len(m.visible())-20)))
 			break
 		}
 	}
-	if len(m.slow) == 0 {
-		lines = append(lines, mutedStyle.Render("slowlog is empty"))
+	if len(m.visible()) == 0 {
+		lines = append(lines, mutedStyle.Render(m.emptyMessage("slowlog is empty")))
 	}
 	lines = append(lines, "", mutedStyle.Render(fmt.Sprintf("keys (%d sampled)", len(m.rkeys))))
 	shown := m.rkeys
@@ -948,12 +971,13 @@ func (m Model) statementsLines(width int) []string {
 	if qw < 20 {
 		qw = 20
 	}
-	for i, s := range m.statements {
+	for pos, i := range m.visible() {
+		s := m.statements[i]
 		line := cell(fmt.Sprintf("%d", s.Calls), 10) +
 			cell(fmt.Sprintf("%.1f", s.MeanMs), 10) +
 			cell(fmt.Sprintf("%.0f", s.TotalMs), 11) +
 			cell(fmt.Sprintf("%d", s.Rows), 10) + truncate(s.Query, qw)
-		if i == m.row && m.focus == focusMain {
+		if pos == m.row && m.focus == focusMain {
 			line = selectedStyle.Render(line)
 		}
 		lines = append(lines, line)
@@ -963,10 +987,17 @@ func (m Model) statementsLines(width int) []string {
 
 func (m Model) renderDetail() string {
 	lines := []string{titleStyle.Render("detail"), ""}
+	vis := m.visible()
+	at := func() (int, bool) {
+		if m.row < len(vis) {
+			return vis[m.row], true
+		}
+		return 0, false
+	}
 	switch m.active {
 	case 0:
-		if m.row < len(m.sessions) {
-			s := m.sessions[m.row]
+		if i, ok := at(); ok {
+			s := m.sessions[i]
 			lines = append(lines,
 				selectedStyle.Render(fmt.Sprintf("pid %d", s.PID)),
 				"user  "+s.User,
@@ -981,8 +1012,8 @@ func (m Model) renderDetail() string {
 			lines = append(lines, mutedStyle.Render("nothing selected"))
 		}
 	case 1:
-		if m.row < len(m.blocks) {
-			b := m.blocks[m.row]
+		if i, ok := at(); ok {
+			b := m.blocks[i]
 			lines = append(lines,
 				selectedStyle.Render(fmt.Sprintf("%d blocked by %d", b.BlockedPID, b.BlockingPID)),
 				"lock  "+b.LockType+" "+b.Mode,
@@ -996,8 +1027,8 @@ func (m Model) renderDetail() string {
 			lines = append(lines, mutedStyle.Render("nothing blocked"))
 		}
 	case 2:
-		if m.row < len(m.tables) {
-			t := m.tables[m.row]
+		if i, ok := at(); ok {
+			t := m.tables[i]
 			lines = append(lines,
 				selectedStyle.Render(t.Schema+"."+t.Name),
 				"size  "+formatBytes(t.SizeBytes),
@@ -1011,8 +1042,8 @@ func (m Model) renderDetail() string {
 		}
 	case 3:
 		if m.lastQuery != "" {
-			if m.row < len(m.sqlRows) {
-				row := m.sqlRows[m.row]
+			if _, ok := at(); ok {
+				row := m.visibleRows()[m.row]
 				lines = append(lines, selectedStyle.Render(fmt.Sprintf("row %d", m.row+1)))
 				for i, v := range row {
 					name := fmt.Sprintf("col%d", i+1)
@@ -1026,8 +1057,8 @@ func (m Model) renderDetail() string {
 			}
 			break
 		}
-		if m.row < len(m.statements) {
-			s := m.statements[m.row]
+		if i, ok := at(); ok {
+			s := m.statements[i]
 			lines = append(lines,
 				selectedStyle.Render(fmt.Sprintf("%d calls", s.Calls)),
 				fmt.Sprintf("mean  %.1f ms", s.MeanMs),
@@ -1040,8 +1071,8 @@ func (m Model) renderDetail() string {
 		}
 	default:
 		if m.active == 4 {
-			if m.row < len(m.slow) {
-				s := m.slow[m.row]
+			if i, ok := at(); ok {
+				s := m.slow[i]
 				lines = append(lines,
 					selectedStyle.Render(fmt.Sprintf("slowlog %d", s.ID)),
 					"at    "+s.At.Format(time.RFC3339),
@@ -1062,13 +1093,20 @@ func (m Model) renderDetail() string {
 }
 
 func (m Model) renderFooter() string {
+	if m.filtering {
+		return mutedStyle.Render("filter: " + m.filterInput.View() + "  ·  enter apply · esc clear")
+	}
+	extra := ""
+	if m.filter != "" {
+		extra = fmt.Sprintf(" · filter: \"%s\" (%d/%d)", m.filter, len(m.visible()), m.unfilteredCount())
+	}
 	if m.active == 3 {
 		if m.editing {
-			return mutedStyle.Render("enter run · esc stop editing")
+			return mutedStyle.Render("enter run · esc stop editing" + extra)
 		}
-		return mutedStyle.Render("i edit · o favorite · f save · x clear · e export · r refresh · ? help · q quit")
+		return mutedStyle.Render("i edit · o favorite · f save · x clear · e export · r refresh · / filter · ctrl+k palette · ? help · q quit" + extra)
 	}
-	return mutedStyle.Render("j/k move · tab focus · 1-5 tabs · enter open · e export · r refresh · ? help · q quit")
+	return mutedStyle.Render("j/k move · tab focus · 1-5 tabs · enter open · e export · r refresh · / filter · ctrl+k palette · ? help · q quit" + extra)
 }
 
 func (m Model) renderHelp() string {
@@ -1087,7 +1125,8 @@ func (m Model) renderHelp() string {
 		"  f             save query as favorite (sql tab)",
 		"  x             clear results (sql tab)",
 		"  e             export current view to csv",
-		"  /             filter (next milestone)",
+		"  ctrl+k        command palette",
+		"  /             filter rows, enter applies, esc clears",
 		"  ?             this screen",
 		"  q             quit",
 		"",
