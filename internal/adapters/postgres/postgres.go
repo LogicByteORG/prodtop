@@ -206,6 +206,16 @@ LIMIT 100`)
 	return out, true, rows.Err()
 }
 
+func (c *Client) Terminate(ctx context.Context, pid int64) (bool, error) {
+	ctx, cancel := c.withTimeout(ctx)
+	defer cancel()
+	var terminated bool
+	if err := c.pool.QueryRow(ctx, `SELECT pg_terminate_backend($1)`, pid).Scan(&terminated); err != nil {
+		return false, fmt.Errorf("terminate backend %d: %w", pid, err)
+	}
+	return terminated, nil
+}
+
 var readVerbs = map[string]bool{
 	"SELECT": true, "WITH": true, "EXPLAIN": true,
 	"SHOW": true, "VALUES": true, "TABLE": true,

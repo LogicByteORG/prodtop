@@ -13,6 +13,7 @@ import (
 	"github.com/prodtop/prodtop/internal/adapters/postgres"
 	"github.com/prodtop/prodtop/internal/adapters/redis"
 	"github.com/prodtop/prodtop/internal/config"
+	"github.com/prodtop/prodtop/internal/core"
 	"github.com/prodtop/prodtop/internal/export"
 	"github.com/prodtop/prodtop/internal/favorites"
 )
@@ -26,7 +27,7 @@ const (
 
 type Model struct {
 	cfg          config.Config
-	write        bool
+	guard        core.Guard
 	version      string
 	active       int
 	focus        int
@@ -59,6 +60,8 @@ type Model struct {
 	palette      bool
 	palCursor    int
 	palQuery     string
+	confirmPID   int64
+	confirming   bool
 	filtering    bool
 	filterInput  textinput.Model
 	filter       string
@@ -108,7 +111,14 @@ type redisMsg struct {
 	err    error
 }
 
-func New(cfg config.Config, write bool, version string) Model {
+type terminateMsg struct {
+	target     string
+	pid        int64
+	terminated bool
+	err        error
+}
+
+func New(cfg config.Config, guard core.Guard, version string) Model {
 	services := make([]string, 0, len(cfg.Postgres)+len(cfg.Redis))
 	for _, pg := range cfg.Postgres {
 		services = append(services, "pg "+pg.Name)
@@ -126,7 +136,7 @@ func New(cfg config.Config, write bool, version string) Model {
 	favs, _ := favorites.Load()
 	return Model{
 		cfg:         cfg,
-		write:       write,
+		guard:       guard,
 		version:     version,
 		services:    services,
 		clients:     map[string]*postgres.Client{},
@@ -273,6 +283,24 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rkeys = msg.keys
 		m.notice = ""
 		return m, nil
+	case terminateMsg:
+		m.loading = false
+		if msg.target != m.selectedTarget() {
+			return m, nil
+		}
+		if msg.err != nil {
+			if m.guard.Write {
+				m.dropClient(msg.target)
+			}
+			m.notice = msg.err.Error()
+			return m, nil
+		}
+		if msg.terminated {
+			m.notice = fmt.Sprintf("terminated backend pid %d", msg.pid)
+		} else {
+			m.notice = fmt.Sprintf("backend pid %d is already gone", msg.pid)
+		}
+		return m.refresh()
 	case tea.KeyPressMsg:
 		if m.palette {
 			return m.updatePalette(msg.String(), msg)
@@ -459,7 +487,7 @@ func (m Model) runSQL() (tea.Model, tea.Cmd) {
 		m.notice = "postgres: " + err.Error()
 		return m, nil
 	}
-	write := m.write
+	write := m.guard.Write
 	m.loading = true
 	return m, func() tea.Msg {
 		start := time.Now()
@@ -553,7 +581,52 @@ func (m Model) refresh() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) terminateCmd(target string, pid int64) tea.Cmd {
+	guard := m.guard
+	if err := guard.RequireWrite(fmt.Sprintf("terminate backend %d", pid)); err != nil {
+		e := err
+		return func() tea.Msg {
+			return terminateMsg{target: target, pid: pid, err: e}
+		}
+	}
+	dsn := ""
+	for _, pg := range m.cfg.Postgres {
+		if "pg "+pg.Name == target {
+			dsn = pg.DSN
+		}
+	}
+	client, err := m.clientFor(target, dsn)
+	if err != nil {
+		e := err
+		return func() tea.Msg {
+			return terminateMsg{target: target, pid: pid, err: e}
+		}
+	}
+	return func() tea.Msg {
+		terminated, err := client.Terminate(context.Background(), pid)
+		if err != nil {
+			return terminateMsg{target: target, pid: pid, err: err}
+		}
+		guard.Record("terminate-backend", fmt.Sprintf("pid %d on %s", pid, target))
+		return terminateMsg{target: target, pid: pid, terminated: terminated}
+	}
+}
+
 func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
+	if m.confirming {
+		switch key {
+		case "y", "enter":
+			target := m.selectedTarget()
+			pid := m.confirmPID
+			m.confirming = false
+			m.loading = true
+			return m, m.terminateCmd(target, pid)
+		case "n", "esc":
+			m.confirming = false
+			return m, nil
+		}
+		return m, nil
+	}
 	if m.help {
 		m.help = false
 		return m, nil
@@ -626,6 +699,16 @@ func (m Model) handleKey(key string) (tea.Model, tea.Cmd) {
 		return m.refresh()
 	case "r":
 		return m.refresh()
+	case "K":
+		if m.active == 0 && m.focus == focusMain {
+			vis := m.visible()
+			if m.row < len(vis) {
+				m.confirmPID = m.sessions[vis[m.row]].PID
+				m.confirming = true
+				return m, nil
+			}
+		}
+		return m, nil
 	case "i":
 		if m.active == 3 {
 			m.editing = true
@@ -685,11 +768,14 @@ func (m Model) render() string {
 	if m.help {
 		return m.renderHelp()
 	}
+	if m.confirming {
+		return m.renderConfirm()
+	}
 	if m.palette {
 		return m.renderPalette()
 	}
 	mode := "READ-ONLY"
-	if m.write {
+	if m.guard.Write {
 		mode = "WRITE"
 	}
 	header := titleStyle.Render("prodtop") + " " +
@@ -1092,6 +1178,28 @@ func (m Model) renderDetail() string {
 	return panelStyle.Width(28).Render(strings.Join(lines, "\n"))
 }
 
+func (m Model) renderConfirm() string {
+	detail := ""
+	for _, s := range m.sessions {
+		if s.PID == m.confirmPID {
+			detail = s.User + " @ " + s.Database + " · " + formatAgo(s.Duration) + " · " + truncate(s.Query, 48)
+		}
+	}
+	lines := []string{
+		titleStyle.Render("terminate backend?"),
+		"",
+		selectedStyle.Render(fmt.Sprintf("pid %d", m.confirmPID)),
+		mutedStyle.Render(detail),
+		"",
+		"y / enter to terminate, n / esc to cancel",
+	}
+	if !m.guard.Write {
+		lines = append(lines, "", noticeStyle.Render("read-only mode: this will be refused without --write"))
+	}
+	box := panelStyle.Width(60).Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+}
+
 func (m Model) renderFooter() string {
 	if m.filtering {
 		return mutedStyle.Render("filter: " + m.filterInput.View() + "  ·  enter apply · esc clear")
@@ -1105,6 +1213,9 @@ func (m Model) renderFooter() string {
 			return mutedStyle.Render("enter run · esc stop editing" + extra)
 		}
 		return mutedStyle.Render("i edit · o favorite · f save · x clear · e export · r refresh · / filter · ctrl+k palette · ? help · q quit" + extra)
+	}
+	if m.active == 0 {
+		return mutedStyle.Render("j/k move · tab focus · 1-5 tabs · enter open · K terminate · e export · r refresh · / filter · ctrl+k palette · ? help · q quit" + extra)
 	}
 	return mutedStyle.Render("j/k move · tab focus · 1-5 tabs · enter open · e export · r refresh · / filter · ctrl+k palette · ? help · q quit" + extra)
 }
@@ -1120,6 +1231,7 @@ func (m Model) renderHelp() string {
 		"  1-5           switch tab",
 		"  enter         open service and refresh",
 		"  r             refresh current view",
+		"  K             terminate backend (activity tab)",
 		"  i             edit sql (sql tab)",
 		"  o             load next favorite (sql tab)",
 		"  f             save query as favorite (sql tab)",

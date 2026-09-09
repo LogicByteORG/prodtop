@@ -63,6 +63,7 @@ prodtop looks for a config file in this order: `--config` flag,
     1 - 5         Activity / Locks / Tables / SQL / Redis
     enter         open service, refresh
     r             refresh
+    K             terminate backend (activity tab, asks first)
     i             edit sql (sql tab), enter runs it, esc stops
     o / f         load next favorite / save favorite (sql tab)
     x             clear sql results

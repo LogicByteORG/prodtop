@@ -33,7 +33,7 @@ func main() {
 
 	guard := core.Guard{Write: *write, AuditPath: core.DefaultAuditPath()}
 
-	model := tui.New(cfg, guard.Write, version)
+	model := tui.New(cfg, guard, version)
 	if usedDefault {
 		model = model.WithNotice("no config file found, copy config.example.yaml to get started")
 	}
