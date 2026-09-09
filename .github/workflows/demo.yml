@@ -15,10 +15,8 @@ jobs:
           POSTGRES_DB: prodtop
         ports:
           - 5432:5432
-        volumes:
-          - ${{ github.workspace }}/demo/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
         options: >-
-          --health-cmd pg_isready
+          --health-cmd "pg_isready -U prodtop -d prodtop"
           --health-interval 5s
           --health-timeout 3s
           --health-retries 10
@@ -40,6 +38,7 @@ jobs:
       - run: curl -sSL -o ttyd https://github.com/tsl0922/ttyd/releases/download/1.7.7/ttyd.x86_64 && chmod +x ttyd && sudo mv ttyd /usr/local/bin/ttyd
       - run: go install github.com/charmbracelet/vhs@latest
       - run: go build -o bin/prodtop ./cmd/prodtop
+      - run: docker run --rm --network host -v ${{ github.workspace }}/demo/seed.sql:/seed.sql:ro -e PGPASSWORD=prodtop postgres:16 psql -h 127.0.0.1 -U prodtop -d prodtop -f /seed.sql
       - run: CID=$(docker ps -q --filter "ancestor=redis:7" | head -n1) && docker exec $CID redis-cli MSET session:1000 abc123 cart:42 active queue:jobs 3 && docker exec $CID redis-cli DEBUG SLEEP 0.4 && docker exec $CID redis-cli DEBUG SLEEP 0.2
       - run: $(go env GOPATH)/bin/vhs demo/demo.tape
       - run: |
